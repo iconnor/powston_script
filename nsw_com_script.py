@@ -10,6 +10,15 @@ buy_top_up_price = 20
 minutes_after_sunrise_solar_matches_load = 30
 solar_production_time = sunrise + timedelta(minutes=minutes_after_sunrise_solar_matches_load)
 
+# logger work around for now
+solar_71934 = inverters.get('inverter_params_71934', {}).get('solar_power', 0)
+solar_71935 = inverters.get('inverter_params_71935', {}).get('solar_power', 0)
+solar_power = solar_71934 + solar_71935
+battery_71934 = inverters.get('inverter_params_71934', {}).get('battery_soc', 0)
+battery_71935 = inverters.get('inverter_params_71935', {}).get('battery_soc', 0)
+battery_soc = (battery_71934 + battery_71935 * 2)/3
+reason += f' {battery_soc}% and {solar_power}W'
+
 if 0 <= hour < 6:
     if sell_price > sell_price_threshold:
         action = 'export'
@@ -22,6 +31,7 @@ if 0 <= hour < 6:
         reason = 'nsw: default to auto mode between midnight and 6am'
 # Stop charging/discharging between 6 AM and 1 PM
 if 6 <= hour < 13:
+    best_upcoming_buy = min(buy_forecast)
     if sell_price > sell_price_threshold_1:
         action = 'export'
         reason = f'nsw: sell price greater than {sell_price_threshold_1} cents between 6am and 1pm'
@@ -31,9 +41,24 @@ if 6 <= hour < 13:
     elif buy_price < buy_price_morning:
         action = 'import'
         reason = f'nsw: buy price less than {buy_price_morning} cents between 6am and 1pm'
+    elif hour > 10 and battery_soc < 25 and buy_price < (best_upcoming_buy + 5):
+        action = 'import'
+        reason = f'nsw: low SOC buy price less than best_upcoming_buy {best_upcoming_buy} + 5c cents between 6am and 1pm'
+    elif battery_soc < 20 and buy_price < (best_upcoming_buy + 5):
+        action = 'charge'
+        reason = f'nsw: low SOC charge under min:{best_upcoming_buy:.2f} + 5 morning mode between 6am and 1pm'
+    elif hour > 12 and battery_soc < 50 and buy_price < (best_upcoming_buy + 5):
+        action = 'import'
+        reason = f'nsw: low SOC afternoon buy price less than best_upcoming_buy {best_upcoming_buy} + 5c cents between 6am and 1pm'
+    elif hour > 9 and battery_soc < 20 and buy_price < max(buy_forecast) / 2:
+        action = 'charge'
+        reason = 'nsw: low SOC so buy now charge mode between 6am and 1pm'
+    elif hour > 9 and battery_soc < 20 and buy_price < 20:
+        action = 'charge'
+        reason = f'nsw: low SOC charge mode between 6am and 1pm vs max/2={max(buy_forecast) / 2}c'
     else:
         action = 'auto'
-        reason = 'nsw: default to auto mode between 6am and 1pm'
+        reason = f'nsw: default to auto mode between 6am and 1pm vs min:max={best_upcoming_buy:.2f}:{max(buy_forecast):.2f}c'
 # Stop charging/discharging between 6 AM and 1 PM
 if 13 <= hour < 15:
     if sell_price > sell_price_threshold_2:
@@ -73,7 +98,7 @@ if 21 <= hour < 24:
 
 if (interval_time.hour > 15) and battery_soc > 80 and sell_price > 10:
     best_upcoming = max(sell_forecast)
-    if best_upcoming < (sell_price + 5):
+    if best_upcoming < (sell_price + 8):
         action = 'export'
         reason = f'nsw: {best_upcoming} < sell within 5c of max'
     else:
@@ -85,7 +110,6 @@ if (hour < 5) and battery_soc > desired_soc and sell_price > 20:
 
 if (hour > 21 or hour < 5) and (battery_soc < desired_soc):
     if (buy_price < buy_top_up_price):
-        best_upcoming = min(buy_forecast)
         if buy_price < (best_upcoming + 2):
             action = 'import'
             reason = f'nsw: low soc and price under top up and within 2 cents of best upcoming {best_upcoming}'
@@ -94,10 +118,21 @@ if (hour > 21 or hour < 5) and (battery_soc < desired_soc):
     else:
         reason += f' waiting to top up {buy_price} < {buy_top_up_price}'
 
-if 4 < hour < 8 and interval_time < solar_production_time and battery_soc > 10 and sell_price > 15:
+pre_solar_sell_price = 15
+# If weekend, you can sell cheaper
+if interval_time.weekday() >= 5:
+    best_upcoming_sell = max(sell_forecast)
+    pre_solar_sell_price = max(10, best_upcoming_sell - 5)
+if 4 < hour < 8 and interval_time < solar_production_time and battery_soc > 10 and sell_price > pre_solar_sell_price:
     action = 'export'
-    reason += f'nsw: before solar production time use it or lose it {solar_production_time}'
+    reason += f'nsw: before solar production time use it or lose it {solar_production_time}hr {pre_solar_sell_price:.2f}c'
 
 if rrp > 800 and battery_soc > min_sell_soc:
     action = 'export'
     reason += f'take the money down to {min_sell_soc}%'
+
+# Test for Sungrow
+# action = 'export_test'
+# optimal_discharging = 20000
+# feed_in_power_limitation = 0
+# reason = f'test export_limit at {optimal_discharging} but feed at {feed_in_power_limitation}'
